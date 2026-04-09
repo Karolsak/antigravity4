@@ -568,8 +568,13 @@ class MotorAnalysisApp(tk.Tk):
             Xd_p = self.Xd_p_var.get()
             Xd = self.Xd_var.get()
             Ta = self.Ta_var.get()
-            Zbase = V1**2 / (self._get_V1() * 3) if self._get_V1() > 0 else 1
-            Zbase = max(1.0, abs(self.X1.get() + self.R1.get()))
+            # Proper motor base impedance: Zbase = V_phase / I1_rated
+            pb_base = motor_params_at_slip(V1, self.freq.get(),
+                                           self.R1.get(), self.R2p.get(),
+                                           self.X1.get(), self.X2p.get(),
+                                           self.Xm.get(), 0.0333, self.poles)
+            I1_rated = abs(pb_base['I1'])
+            Zbase = V1 / I1_rated if I1_rated > 0 else max(1.0, abs(self.X1.get() + self.R1.get()))
 
             I_pp = V1 / (Xd_pp * Zbase + Zf) if (Xd_pp * Zbase + Zf) > 0 else 0
             I_p = V1 / (Xd_p * Zbase + Zf) if (Xd_p * Zbase + Zf) > 0 else 0
@@ -938,7 +943,7 @@ class MotorAnalysisApp(tk.Tk):
             load = self.load_pct_var.get() / 100.0
 
             def thermal_sim(load_factor):
-                pb = motor_params_at_slip(V1, f, R1, R2p * load_factor**0, X1, X2p, Xm,
+                pb = motor_params_at_slip(V1, f, R1, R2p, X1, X2p, Xm,
                                           s_fl, poles, Prot)
                 I1 = abs(pb['I1']) * load_factor
                 I2p = abs(pb['I2p']) * load_factor
@@ -1219,10 +1224,15 @@ class MotorAnalysisApp(tk.Tk):
             for i, (h, v) in enumerate(zip(harm_amps, harm_pct)):
                 ax3.text(i, h + 0.1, f"{v:.1f}%", ha='center', fontsize=8)
 
+            pb_fl = motor_params_at_slip(self._get_V1(), self.freq.get(),
+                                         self.R1.get(), self.R2p.get(),
+                                         self.X1.get(), self.X2p.get(),
+                                         self.Xm.get(), 0.0333, self.poles)
+            dpf = abs(pb_fl['pf'])
             indices = {'IHD': harm_pct[1:],
                        'THD': [THD],
-                       'DPF': [np.cos(0)],
-                       'PF_dist': [1 / np.sqrt(1 + (THD / 100)**2)]}
+                       'DPF': [dpf],
+                       'PF_dist': [dpf / np.sqrt(1 + (THD / 100)**2)]}
 
             metrics = [f"THD = {THD:.2f} %",
                        f"5th = {self.h5_var.get():.1f} %  (limit 6%)",
