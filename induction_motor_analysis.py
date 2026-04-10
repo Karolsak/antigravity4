@@ -165,6 +165,16 @@ class AdvancedPowerSystemApp(tk.Tk):
         self.h7 = tk.DoubleVar(value=2.5)
         self.h11 = tk.DoubleVar(value=1.2)
 
+        # User-question inputs (generator efficiency problem)
+        self.p_out_mw = tk.DoubleVar(value=500.0)
+        self.eff_pct = tk.DoubleVar(value=98.4)
+        self.ifield_a = tk.DoubleVar(value=2400.0)
+        self.vfield_v = tk.DoubleVar(value=300.0)
+        self.airflow_m3s = tk.DoubleVar(value=280.0)
+        self.air_rho = tk.DoubleVar(value=1.2)
+        self.air_cp = tk.DoubleVar(value=1005.0)
+        self.poles = tk.DoubleVar(value=2.0)
+
         self._build_menu()
         self._build_notebook()
         self._build_status()
@@ -253,6 +263,14 @@ class AdvancedPowerSystemApp(tk.Tk):
             ("Active power P (pu)", self.p_pu, 0.2, 1.2),
             ("Transient decay T' (s)", self.t_transient, 0.05, 1.0),
             ("DC offset tau (s)", self.dc_tau, 0.01, 0.2),
+            ("Output power (MW)", self.p_out_mw, 100.0, 1200.0),
+            ("Efficiency (%)", self.eff_pct, 80.0, 99.8),
+            ("Field current (A)", self.ifield_a, 200.0, 6000.0),
+            ("Field voltage (Vdc)", self.vfield_v, 50.0, 1200.0),
+            ("Air flow (m^3/s)", self.airflow_m3s, 20.0, 600.0),
+            ("Air density (kg/m^3)", self.air_rho, 0.8, 1.4),
+            ("Air Cp (J/kgK)", self.air_cp, 950.0, 1100.0),
+            ("Machine poles", self.poles, 2.0, 12.0),
         ]
         for r, (name, var, lo, hi) in enumerate(params):
             ttk.Label(left, text=name).grid(row=r, column=0, sticky="w", padx=4, pady=3)
@@ -493,6 +511,18 @@ class AdvancedPowerSystemApp(tk.Tk):
         e0_pu = induced_voltage_pu_from_pf_unity(self.xd.get(), self.p_pu.get())
         i_init_pu, i_final_pu = short_circuit_currents_pu(e0_pu, self.xd_prime.get(), self.xd.get())
 
+        p_out_w = self.p_out_mw.get() * 1e6
+        eff = clamp(self.eff_pct.get() / 100.0, 0.01, 0.999999)
+        p_in_total = p_out_w / eff
+        p_losses_total = p_in_total - p_out_w
+        p_rotor_cu = self.vfield_v.get() * self.ifield_a.get()
+        p_shaft = max(p_in_total - p_rotor_cu, EPS)
+        poles_even = max(2.0, 2.0 * round(self.poles.get() / 2.0))
+        n_sync_rpm = 120.0 * self.freq.get() / poles_even
+        omega_sync = 2.0 * np.pi * n_sync_rpm / 60.0
+        turbine_torque = p_shaft / max(omega_sync, EPS)
+        delta_t_air = p_losses_total / max(self.air_rho.get() * self.airflow_m3s.get() * self.air_cp.get(), EPS)
+
         return {
             "i_base": i_base,
             "z_base": z_base,
@@ -502,6 +532,14 @@ class AdvancedPowerSystemApp(tk.Tk):
             "i_final_pu": i_final_pu,
             "i_init_a": i_init_pu * i_base,
             "i_final_a": i_final_pu * i_base,
+            "p_out_w": p_out_w,
+            "eff": eff,
+            "p_losses_total": p_losses_total,
+            "p_rotor_cu": p_rotor_cu,
+            "p_shaft": p_shaft,
+            "n_sync_rpm": n_sync_rpm,
+            "turbine_torque": turbine_torque,
+            "delta_t_air": delta_t_air,
         }
 
     def update_all(self) -> None:
@@ -520,8 +558,26 @@ class AdvancedPowerSystemApp(tk.Tk):
 
     def _update_main_text(self, d: dict[str, float]) -> None:
         txt = []
-        txt.append("SYNCHRONOUS GENERATOR FAULT STUDY (Detailed)\n")
-        txt.append("Given: 250 MVA, 25 kV, 3-phase, unity PF, Xd=1.6 pu, X'd=0.23 pu.\n")
+        txt.append("SYNCHRONOUS GENERATOR: DETAILED SOLUTION + MODELLING\n")
+        txt.append("Question data: η=98.4%, Pout=500 MW, Ifield=2400 A, Vfield=300 V, airflow=280 m^3/s.\n")
+        txt.append("\nA) Total losses in machine:\n")
+        txt.append("   η = Pout/Pin  =>  Pin = Pout/η\n")
+        txt.append(f"   Pin = {d['p_out_w']/1e6:.3f}/{d['eff']:.5f} = {(d['p_out_w']/d['eff'])/1e6:.3f} MW\n")
+        txt.append(f"   P_losses,total = Pin - Pout = {d['p_losses_total']/1e6:.3f} MW\n")
+        txt.append("\nB) Rotor copper losses:\n")
+        txt.append("   Pcu,rotor = Vdc * Idc\n")
+        txt.append(f"   Pcu,rotor = {self.vfield_v.get():.1f} * {self.ifield_a.get():.1f} = {d['p_rotor_cu']/1e3:.1f} kW\n")
+        txt.append("\nC) Turbine developed torque:\n")
+        txt.append("   Assumption: overall efficiency includes field power, so shaft power Pshaft = Pin - Pfield.\n")
+        txt.append(f"   n_sync = 120 f/P = {d['n_sync_rpm']:.1f} rpm, ω = 2πn/60\n")
+        txt.append(f"   T_turbine = Pshaft/ω = {d['turbine_torque']:.1f} N·m\n")
+        txt.append("\nD) Average cooling-air temperature rise:\n")
+        txt.append("   ΔT = Ploss / (ρ * Q * cp)\n")
+        txt.append(f"   ΔT = {d['p_losses_total']:.2e} / ({self.air_rho.get():.3f}*{self.airflow_m3s.get():.2f}*{self.air_cp.get():.1f})")
+        txt.append(f" = {d['delta_t_air']:.2f} °C\n")
+        txt.append("\nInterpretation: this ΔT is a bulk-average estimate. Real local hotspots can be significantly higher.\n")
+        txt.append("\n----------------------------------\n")
+        txt.append("Dynamic module (fault & controls) used for practical engineering studies:\n")
         txt.append("\n1) Base values:\n")
         txt.append(f"   I_base = S/(√3V) = {d['i_base']:.2f} A\n")
         txt.append(f"   Z_base = V^2/S = {d['z_base']:.4f} Ω\n")
@@ -644,7 +700,7 @@ class AdvancedPowerSystemApp(tk.Tk):
 
     def update_thermal_plot(self) -> None:
         d = self._compute_case()
-        copper_loss = 3.0 * (d["i_final_a"] ** 2) * 0.004
+        copper_loss = d["p_rotor_cu"] + 3.0 * (d["i_final_a"] ** 2) * 0.004
         t = np.linspace(0, 6 * 3600, 1800)
         tau = max(self.therm_rth.get() * self.therm_cth.get(), EPS)
         t_inf = self.therm_amb.get() + copper_loss * self.therm_rth.get()
@@ -721,15 +777,22 @@ class AdvancedPowerSystemApp(tk.Tk):
         ax4 = self.adv_fig.add_subplot(224)
 
         # A) Current metrics
-        ax1.bar(["Initial SC kA", "Final SC kA"], [d["i_init_a"] / 1000.0, d["i_final_a"] / 1000.0],
-                color=["tab:red", "tab:blue"])
+        ax1.bar(
+            ["Initial SC kA", "Final SC kA"],
+            [d["i_init_a"] / 1000.0, d["i_final_a"] / 1000.0],
+            color=["tab:red", "tab:blue"],
+        )
         ax1.set_title("Fault Current Metrics")
         ax1.grid(alpha=0.25)
 
-        # B) Stability margin heuristic
-        margin = (self.xd.get() - self.xd_prime.get()) / max(self.xd.get(), EPS)
-        ax2.pie([margin, 1 - margin], labels=["Transient reserve", "Used"], autopct="%1.1f%%")
-        ax2.set_title("Reactance Separation Index")
+        # B) Energy balance from problem statement
+        losses_other = max(d["p_losses_total"] - d["p_rotor_cu"], 0.0)
+        ax2.pie(
+            [d["p_out_w"], d["p_rotor_cu"], losses_other],
+            labels=["Output", "Rotor Cu", "Other losses"],
+            autopct="%1.1f%%",
+        )
+        ax2.set_title("Power Balance Breakdown")
 
         # C) Protection margin
         cti = self.tms_back.get() - self.tms_pri.get()
@@ -746,7 +809,7 @@ class AdvancedPowerSystemApp(tk.Tk):
         score -= clamp((d["i_init_pu"] - 5.0) * 3.0, 0.0, 30.0)
         score -= clamp((0.2 - cti) * 80.0, 0.0, 25.0)
         score = clamp(score, 0.0, 100.0)
-        ax4.bar(["Overall index"], [score], color="tab:blue")
+        ax4.bar(["Overall index", "ΔT air (°C)"], [score, clamp(d["delta_t_air"], 0.0, 100.0)], color=["tab:blue", "tab:orange"])
         ax4.axhline(80, color="tab:green", ls="--")
         ax4.set_ylim(0, 100)
         ax4.set_title("Comprehensive Engineering Index")
@@ -764,6 +827,14 @@ class AdvancedPowerSystemApp(tk.Tk):
         self.p_pu.set(1.0)
         self.t_transient.set(0.18)
         self.dc_tau.set(0.06)
+        self.p_out_mw.set(500.0)
+        self.eff_pct.set(98.4)
+        self.ifield_a.set(2400.0)
+        self.vfield_v.set(300.0)
+        self.airflow_m3s.set(280.0)
+        self.air_rho.set(1.2)
+        self.air_cp.set(1005.0)
+        self.poles.set(2.0)
         self.update_all()
 
 
