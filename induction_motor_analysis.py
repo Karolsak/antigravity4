@@ -165,6 +165,11 @@ class AdvancedPowerSystemApp(tk.Tk):
         self.h7 = tk.DoubleVar(value=2.5)
         self.h11 = tk.DoubleVar(value=1.2)
 
+        # Q13/Q14: synchronous generator with resistive load
+        self.gen_e0 = tk.DoubleVar(value=3000.0)
+        self.gen_xs = tk.DoubleVar(value=6.0)
+        self.gen_r = tk.DoubleVar(value=8.0)
+
         self._build_menu()
         self._build_notebook()
         self._build_status()
@@ -214,6 +219,7 @@ class AdvancedPowerSystemApp(tk.Tk):
         self.tab_economic = ttk.Frame(self.nb)
         self.tab_harmonic = ttk.Frame(self.nb)
         self.tab_advanced = ttk.Frame(self.nb)
+        self.tab_gen_load = ttk.Frame(self.nb)
 
         self.nb.add(self.tab_input, text="Main Menu / Inputs")
         self.nb.add(self.tab_fault, text="Modelling & Fault Current")
@@ -223,6 +229,7 @@ class AdvancedPowerSystemApp(tk.Tk):
         self.nb.add(self.tab_economic, text="Economic Analysis")
         self.nb.add(self.tab_harmonic, text="Harmonic & Power Quality")
         self.nb.add(self.tab_advanced, text="Comprehensive Analysis")
+        self.nb.add(self.tab_gen_load, text="Q13/Q14: Generator Load")
 
         self._build_tab_input()
         self._build_tab_fault()
@@ -232,6 +239,7 @@ class AdvancedPowerSystemApp(tk.Tk):
         self._build_tab_economic()
         self._build_tab_harmonic()
         self._build_tab_advanced()
+        self._build_tab_gen_load()
 
     # ---------------------------------------------------------------------
     # Tab 1: Inputs + detailed result text
@@ -514,6 +522,7 @@ class AdvancedPowerSystemApp(tk.Tk):
         self.update_econ_plot()
         self.update_harm_plot()
         self.update_advanced_plot()
+        self.update_gen_load_plot()
         self.status_var.set(
             f"Solved: E0={data['e0_pu']:.3f} pu, I_initial={data['i_init_a']:.0f} A, I_final={data['i_final_a']:.0f} A"
         )
@@ -754,6 +763,319 @@ class AdvancedPowerSystemApp(tk.Tk):
 
         self.adv_fig.tight_layout()
         self.adv_canvas.draw_idle()
+
+    # ---------------------------------------------------------------------
+    # Tab 9: Q13/Q14 – 3-phase generator with resistive load
+    # ---------------------------------------------------------------------
+    def _build_tab_gen_load(self) -> None:
+        t = self.tab_gen_load
+        t.columnconfigure(0, weight=1)
+        t.columnconfigure(1, weight=3)
+        t.rowconfigure(0, weight=1)
+
+        left = ttk.LabelFrame(t, text="Input Parameters – Q13 / Q14")
+        left.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        left.columnconfigure(1, weight=1)
+
+        params = [
+            ("Excitation E\u2080 (V/phase)", self.gen_e0, 500.0, 6000.0),
+            ("Sync. reactance Xs (\u03a9)", self.gen_xs, 0.5, 30.0),
+            ("Resistive load R (\u03a9) [Q13]", self.gen_r, 0.1, 50.0),
+        ]
+        for r, (name, var, lo, hi) in enumerate(params):
+            ttk.Label(left, text=name).grid(row=r, column=0, sticky="w", padx=4, pady=3)
+            value_lbl = ttk.Label(left, width=10, text=f"{var.get():.2f}")
+            value_lbl.grid(row=r, column=2, sticky="e")
+            ttk.Scale(
+                left,
+                from_=lo,
+                to=hi,
+                variable=var,
+                orient="horizontal",
+                length=200,
+                command=lambda _v, vv=var, ll=value_lbl: (
+                    ll.config(text=f"{vv.get():.2f}"),
+                    self.update_gen_load_plot(),
+                ),
+            ).grid(row=r, column=1, padx=4)
+
+        btn_frame = ttk.Frame(left)
+        btn_frame.grid(row=len(params), column=0, columnspan=3, pady=6)
+        ttk.Button(btn_frame, text="Start", command=self.update_gen_load_plot).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Stop",
+                   command=lambda: self.status_var.set("Generator analysis paused.")).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Reset", command=self._reset_gen_load).pack(side="left", padx=4)
+
+        self.gen_text = tk.Text(left, wrap="word", font=("Consolas", 9))
+        self.gen_text.grid(row=len(params) + 1, column=0, columnspan=3,
+                           sticky="nsew", padx=4, pady=4)
+        sb = ttk.Scrollbar(left, orient="vertical", command=self.gen_text.yview)
+        sb.grid(row=len(params) + 1, column=3, sticky="ns")
+        self.gen_text.configure(yscrollcommand=sb.set)
+        left.rowconfigure(len(params) + 1, weight=1)
+
+        right = ttk.LabelFrame(t, text="Visualization – Q13 / Q14")
+        right.grid(row=0, column=1, sticky="nsew", padx=6, pady=6)
+        right.rowconfigure(0, weight=1)
+        right.columnconfigure(0, weight=1)
+
+        self.gen_fig = Figure(figsize=(10, 8), dpi=100)
+        self.gen_canvas = FigureCanvasTkAgg(self.gen_fig, master=right)
+        self.gen_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+    def update_gen_load_plot(self) -> None:
+        E0 = self.gen_e0.get()
+        Xs = max(self.gen_xs.get(), EPS)
+        R_q13 = max(self.gen_r.get(), EPS)
+
+        # Q13: single operating point ----------------------------------------
+        denom_q13 = np.sqrt(R_q13 ** 2 + Xs ** 2)
+        I_q13 = E0 / denom_q13
+        E_q13 = I_q13 * R_q13
+        P_q13 = I_q13 ** 2 * R_q13
+        jXsI_q13 = Xs * I_q13
+
+        # Q14: table of fixed R values ----------------------------------------
+        fixed_R_raw = [None, 24.0, 12.0, 6.0, 3.0, 0.0]   # None = open circuit
+        R_labels = ["\u221e", "24", "12", "6", "3", "0"]
+        I_tbl: list[float] = []
+        E_tbl: list[float] = []
+        P_tbl: list[float] = []
+        for Rv in fixed_R_raw:
+            if Rv is None:                          # open circuit
+                I_tbl.append(0.0)
+                E_tbl.append(E0)
+                P_tbl.append(0.0)
+            elif Rv == 0.0:                         # short circuit
+                I_tbl.append(E0 / Xs)
+                E_tbl.append(0.0)
+                P_tbl.append(0.0)
+            else:
+                Ii = E0 / np.sqrt(Rv ** 2 + Xs ** 2)
+                I_tbl.append(Ii)
+                E_tbl.append(Ii * Rv)
+                P_tbl.append(Ii ** 2 * Rv)
+
+        # Maximum power (R_opt = Xs) -----------------------------------------
+        R_opt = Xs
+        P_max = E0 ** 2 / (2.0 * Xs)
+
+        # Continuous parametric curves (R: EPS → 150 Ω) ----------------------
+        R_c = np.linspace(EPS, 150.0, 1000)
+        I_c = E0 / np.sqrt(R_c ** 2 + Xs ** 2)
+        E_c = I_c * R_c
+        P_c = (I_c ** 2) * R_c
+
+        # ── build figure ────────────────────────────────────────────────────
+        self.gen_fig.clear()
+        ax1 = self.gen_fig.add_subplot(221)
+        ax2 = self.gen_fig.add_subplot(222)
+        ax3 = self.gen_fig.add_subplot(223)
+        ax4 = self.gen_fig.add_subplot(224)
+
+        # ── ax1: Phasor diagram (Q13) ──
+        pad = E0 * 0.13
+        ax1.annotate("", xy=(E_q13, 0), xytext=(0, 0),
+                     arrowprops=dict(arrowstyle="->", color="tab:blue", lw=2.5))
+        ax1.annotate("", xy=(E_q13, jXsI_q13), xytext=(E_q13, 0),
+                     arrowprops=dict(arrowstyle="->", color="tab:orange", lw=2.5))
+        ax1.annotate("", xy=(E_q13, jXsI_q13), xytext=(0, 0),
+                     arrowprops=dict(arrowstyle="->", color="tab:red", lw=2.5))
+        ax1.annotate("", xy=(min(I_q13 * 0.28, E_q13 * 0.35), 0), xytext=(0, 0),
+                     arrowprops=dict(arrowstyle="->", color="tab:gray", lw=1.5))
+        ax1.text(E_q13 / 2.0, -pad * 0.55,
+                 f"E = {E_q13:.1f} V", ha="center", color="tab:blue",
+                 fontsize=9, fontweight="bold")
+        ax1.text(E_q13 + pad * 0.15, jXsI_q13 / 2.0,
+                 f"jXsI = {jXsI_q13:.1f} V", color="tab:orange", fontsize=9)
+        ax1.text(E_q13 * 0.25, jXsI_q13 * 0.72,
+                 f"E\u2080 = {E0:.1f} V", color="tab:red", fontsize=9, fontweight="bold")
+        ax1.text(min(I_q13 * 0.14, E_q13 * 0.18), -pad * 0.3,
+                 "I (ref)", color="tab:gray", fontsize=8)
+        ax1.set_xlim(-pad * 0.4, E_q13 + pad * 1.6)
+        ax1.set_ylim(-pad * 0.8, jXsI_q13 + pad * 0.8)
+        ax1.axhline(0, color="k", lw=0.5)
+        ax1.axvline(0, color="k", lw=0.5)
+        ax1.set_aspect("equal", adjustable="box")
+        ax1.set_title(
+            f"Q13: Phasor Diagram  (R = {R_q13:.1f} \u03a9)\n"
+            f"I = {I_q13:.2f} A  |  E = {E_q13:.2f} V  |  E\u2080 = {E0:.1f} V",
+            fontsize=9,
+        )
+        ax1.set_xlabel("Real axis (V)")
+        ax1.set_ylabel("Imaginary axis (V)")
+        ax1.grid(alpha=0.3)
+
+        # ── ax2: E vs I (Q14a) ──
+        ax2.plot(I_c, E_c, lw=2, color="tab:blue", label="E vs I  (variable R)")
+        ax2.scatter(I_tbl[1:-1], E_tbl[1:-1],
+                    color="tab:red", zorder=5, s=60, label="Fixed R values")
+        ax2.scatter([0.0], [E0], marker="^", s=90, color="tab:green", zorder=6,
+                    label="R = \u221e  (open circuit)")
+        ax2.scatter([E0 / Xs], [0.0], marker="s", s=80, color="tab:purple", zorder=6,
+                    label="R = 0  (short circuit)")
+        ax2.scatter([I_q13], [E_q13], marker="*", s=200, color="tab:red", zorder=7,
+                    label=f"Q13: R = {R_q13:.1f} \u03a9")
+        for Ii, Ei, rl in zip(I_tbl[1:-1], E_tbl[1:-1], R_labels[1:-1]):
+            ax2.annotate(f"  {rl}\u03a9", (Ii, Ei), fontsize=7, color="tab:gray")
+        ax2.set_title("Q14a: Terminal Voltage E  vs  Load Current I")
+        ax2.set_xlabel("Load Current  I (A)")
+        ax2.set_ylabel("Terminal Voltage  E (V)")
+        ax2.set_xlim(-E0 / Xs * 0.04, E0 / Xs * 1.08)
+        ax2.set_ylim(-E0 * 0.04, E0 * 1.08)
+        ax2.grid(alpha=0.3)
+        ax2.legend(fontsize=8)
+
+        # ── ax3: Power per phase bar chart (Q14b) ──
+        p_kw = [p / 1000.0 for p in P_tbl]
+        ax3.bar(R_labels, p_kw, color="tab:steelblue")
+        p_max_kw = P_max / 1000.0
+        for j, pv in enumerate(p_kw):
+            ax3.text(j, pv + p_max_kw * 0.015,
+                     f"{pv:.1f}", ha="center", fontsize=8)
+        ax3.axhline(p_max_kw, ls="--", color="tab:red",
+                    label=f"P_max = {p_max_kw:.1f} kW @ R = Xs = {Xs:.1f} \u03a9")
+        ax3.set_title("Q14b: Active Power P per Phase")
+        ax3.set_xlabel("Resistance  R (\u03a9)")
+        ax3.set_ylabel("Power (kW)")
+        ax3.set_ylim(0, p_max_kw * 1.18)
+        ax3.grid(alpha=0.25, axis="y")
+        ax3.legend(fontsize=8)
+
+        # ── ax4: E vs P (Q14c) ──
+        ax4.plot(P_c / 1000.0, E_c, lw=2, color="tab:green", label="E vs P  (variable R)")
+        ax4.scatter([p / 1000.0 for p in P_tbl[1:-1]], E_tbl[1:-1],
+                    color="tab:red", zorder=5, s=60)
+        ax4.axvline(p_max_kw, ls="--", color="tab:purple",
+                    label=f"P_max = {p_max_kw:.1f} kW\n@ R = Xs = {Xs:.1f} \u03a9")
+        for Pv, Ei, rl in zip(P_tbl[1:-1], E_tbl[1:-1], R_labels[1:-1]):
+            ax4.annotate(f"  {rl}\u03a9", (Pv / 1000.0, Ei), fontsize=7, color="tab:gray")
+        ax4.set_title("Q14c: Terminal Voltage E  vs  Power P")
+        ax4.set_xlabel("Power per Phase  P (kW)")
+        ax4.set_ylabel("Terminal Voltage  E (V)")
+        ax4.grid(alpha=0.3)
+        ax4.legend(fontsize=8)
+
+        self.gen_fig.tight_layout()
+        self.gen_canvas.draw_idle()
+
+        self._update_gen_text(
+            E0, Xs, R_q13, I_q13, E_q13, P_q13, jXsI_q13,
+            R_labels, I_tbl, E_tbl, P_tbl, R_opt, P_max,
+        )
+        self.status_var.set(
+            f"Q13: E = {E_q13:.1f} V, I = {I_q13:.1f} A, P = {P_q13/1000.0:.2f} kW  |  "
+            f"P_max = {P_max/1000.0:.1f} kW @ R = Xs = {Xs:.1f} \u03a9"
+        )
+
+    def _update_gen_text(
+        self,
+        E0: float,
+        Xs: float,
+        R_q13: float,
+        I_q13: float,
+        E_q13: float,
+        P_q13: float,
+        jXsI_q13: float,
+        R_labels: list,
+        I_tbl: list,
+        E_tbl: list,
+        P_tbl: list,
+        R_opt: float,
+        P_max: float,
+    ) -> None:
+        lines = [
+            "=" * 60 + "\n",
+            " QUESTION 13 – 3-Phase Generator with Resistive Load\n",
+            "=" * 60 + "\n",
+            "\n",
+            "GIVEN:\n",
+            f"  Synchronous reactance  Xs = {Xs:.4f} \u03a9\n",
+            f"  Excitation voltage     E\u2080 = {E0:.2f} V (line-to-neutral)\n",
+            f"  Resistive load         R  = {R_q13:.4f} \u03a9\n",
+            "\n",
+            "CIRCUIT EQUATION (phasor):\n",
+            "  E\u2080 = E + jXs\u00b7I          (Kirchhoff's voltage law)\n",
+            "  Resistive load \u21d2 E = I\u00b7R  (E in phase with I)\n",
+            "  \u2234  E\u2080 = I\u00b7R + jXs\u00b7I = I\u00b7(R + jXs)\n",
+            "\n",
+            "SOLUTION:\n",
+            "  |E\u2080|\u00b2 = |I|\u00b2 \u00b7 (R\u00b2 + Xs\u00b2)\n",
+            "  |I|  = |E\u2080| / \u221a(R\u00b2 + Xs\u00b2)\n",
+            f"       = {E0:.2f} / \u221a({R_q13:.4f}\u00b2 + {Xs:.4f}\u00b2)\n",
+            f"       = {E0:.2f} / \u221a({R_q13**2:.4f} + {Xs**2:.4f})\n",
+            f"       = {E0:.2f} / {np.sqrt(R_q13**2 + Xs**2):.6f}\n",
+            f"       = {I_q13:.6f} A  \u2248  {I_q13:.2f} A\n",
+            "\n",
+            f"  |E|  = I\u00b7R = {I_q13:.6f} \u00d7 {R_q13:.4f}\n",
+            f"       = {E_q13:.6f} V  \u2248  {E_q13:.2f} V  (line-to-neutral)\n",
+            f"  Line-to-line voltage = E\u00b7\u221a3 = {E_q13 * np.sqrt(3.0):.2f} V\n",
+            "\n",
+            "PHASOR DIAGRAM (top-left plot):\n",
+            "  \u2022 Reference: current I along +real axis\n",
+            f"  \u2022 E  = {E_q13:.2f} V  along +real (resistive \u21d2 in phase with I)\n",
+            f"  \u2022 jXs\u00b7I = {jXsI_q13:.2f} V  along +imag (leads I by 90\u00b0)\n",
+            f"  \u2022 E\u2080 = \u221a(E\u00b2 + (Xs\u00b7I)\u00b2) = \u221a({E_q13**2:.2f} + {jXsI_q13**2:.2f})\n",
+            f"       = {np.sqrt(E_q13**2 + jXsI_q13**2):.4f} V  \u2713 checks with E\u2080 = {E0:.2f} V\n",
+            "\n",
+            "ACTIVE POWER per phase:\n",
+            f"  P = I\u00b2\u00b7R = {I_q13:.6f}\u00b2 \u00d7 {R_q13:.4f}\n",
+            f"    = {P_q13:.4f} W  =  {P_q13 / 1000.0:.6f} kW\n",
+            "\n",
+            "=" * 60 + "\n",
+            " QUESTION 14 – E vs I and E vs P Curves\n",
+            "=" * 60 + "\n",
+            "\n",
+            "a) E vs I for various resistive loads:\n",
+            f"   {'R (\u03a9)':<12}{'I (A)':<16}{'E (V)':<16}\n",
+            "   " + "\u2500" * 44 + "\n",
+        ]
+        for rl, Ii, Ei in zip(R_labels, I_tbl, E_tbl):
+            lines.append(f"   {rl:<12}{Ii:<16.4f}{Ei:<16.4f}\n")
+
+        lines += [
+            "\n",
+            "b) Active power P per phase:\n",
+            "   Formula: P = I\u00b2\u00b7R = E\u2080\u00b2\u00b7R / (R\u00b2 + Xs\u00b2)\n\n",
+            f"   {'R (\u03a9)':<12}{'P (W)':<16}{'P (kW)':<16}\n",
+            "   " + "\u2500" * 44 + "\n",
+        ]
+        for rl, Pv in zip(R_labels, P_tbl):
+            lines.append(f"   {rl:<12}{Pv:<16.4f}{Pv / 1000.0:<16.6f}\n")
+
+        lines += [
+            "\n",
+            "c) Maximum power condition:\n",
+            "   P(R) = E\u2080\u00b2\u00b7R / (R\u00b2 + Xs\u00b2)\n",
+            "   dP/dR = E\u2080\u00b2\u00b7(Xs\u00b2 \u2212 R\u00b2) / (R\u00b2 + Xs\u00b2)\u00b2  =  0\n",
+            f"   \u2192  R_opt = Xs = {R_opt:.4f} \u03a9\n",
+            "\n",
+            "   P_max = E\u2080\u00b2 / (2\u00b7Xs)\n",
+            f"         = {E0:.2f}\u00b2 / (2 \u00d7 {Xs:.4f})\n",
+            f"         = {E0 ** 2:.4f} / {2.0 * Xs:.4f}\n",
+            f"         = {P_max:.4f} W  =  {P_max / 1000.0:.6f} kW  (per phase)\n",
+            f"   3-phase P_max = 3 \u00d7 {P_max / 1000.0:.6f}\n",
+            f"               = {3.0 * P_max / 1000.0:.6f} kW\n",
+            "\n",
+            "PHYSICAL INSIGHT:\n",
+            "  \u2022 Maximum power transfer when R = |jXs| = Xs\n",
+            "    (matched impedance for purely reactive source Z).\n",
+            "  \u2022 E vs I traces a QUARTER-CIRCLE (proof):\n",
+            "    E = I\u00b7R,  I\u00b7Xs = I\u00b7Xs,  and I = E\u2080/\u221a(R\u00b2+Xs\u00b2)\n",
+            "    \u21d2 E\u00b2 + (I\u00b7Xs)\u00b2 = (I\u00b7R)\u00b2 + (I\u00b7Xs)\u00b2 = I\u00b2(R\u00b2+Xs\u00b2) = E\u2080\u00b2\n",
+            "    \u21d2 E\u00b2 + (I\u00b7Xs)\u00b2 = E\u2080\u00b2   (circle of radius E\u2080).\n",
+            "  \u2022 As R\u2192\u221e:  I\u21920, E\u2192E\u2080  (no-load voltage = excitation).\n",
+            "  \u2022 Short-circuit (R = 0):  all voltage across Xs,\n",
+            f"    I_sc = E\u2080/Xs = {E0:.2f}/{Xs:.4f} = {E0 / Xs:.4f} A.\n",
+        ]
+        self.gen_text.delete("1.0", "end")
+        self.gen_text.insert("1.0", "".join(lines))
+
+    def _reset_gen_load(self) -> None:
+        self.gen_e0.set(3000.0)
+        self.gen_xs.set(6.0)
+        self.gen_r.set(8.0)
+        self.update_gen_load_plot()
 
     def _reset_defaults(self) -> None:
         self.mva.set(250.0)
